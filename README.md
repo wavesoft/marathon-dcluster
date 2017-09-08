@@ -1,6 +1,8 @@
 # 🚧 marathon-dcluster
 > A very simple script to create local mesos/marathon cluster for debugging purposes
 
+![Alt text](/doc/marathon-dcluster.gif?raw=true "DCluster Demo")
+
 This python script can be used to deploy a local zookeeper/mesos/marathon cluster in an isolated container for debugging purposes. It's developed using only the core python libraries, so you can use it without any hassle.
 
 # Requirements
