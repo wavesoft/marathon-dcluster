@@ -1,0 +1,535 @@
+#!/usr/bin/env python
+######################################################
+# Local mesos+marathon cluster deployment script
+# ----------------------------------------------------
+# This script is using docker-compose to create a
+# local cluster using the given mesos, zookeeper
+# versions and optionally over-provisioned resources
+######################################################
+import argparse
+import distutils.spawn
+import errno
+import json
+import multiprocessing
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import urllib
+import webbrowser
+
+try:
+  import urllib2 as urllib
+except ModuleNotFoundError:
+  import urllib.request as urllib
+
+SPLIT_EQ = re.compile(r'\s*=\s*')
+
+def mkdir_p(path):
+  """
+  Recursively create directory
+  """
+  try:
+    os.makedirs(path)
+  except OSError as exc:  # Python >2.5
+    if exc.errno == errno.EEXIST and os.path.isdir(path):
+      pass
+    else:
+      raise
+
+
+def rm_r(path):
+  """
+  Recursively remove directory
+  """
+  if os.path.isdir(path) and not os.path.islink(path):
+    shutil.rmtree(path)
+  elif os.path.exists(path):
+    os.remove(path)
+
+
+def die(message):
+  """
+  Exit with the given error message
+  """
+  print("ERROR: %s" % message)
+  sys.exit(1)
+
+
+def loadConfig(filename, defaults={}):
+  """
+  Load environment config from the given file
+  """
+  config = defaults
+  with open(filename, 'r') as f:
+    for line in f:
+      line = line.strip()
+      if not line or line[0] == "#":
+        continue
+
+      (key, value) = SPLIT_EQ.split(line)
+      config[key] = value
+
+  return config
+
+
+def prepareWorkdir(workdir):
+  """
+  Prepare the workdir structure
+  """
+  mkdir_p("%s/log/mesos-master" % workdir)
+  mkdir_p("%s/log/mesos-slave" % workdir)
+  mkdir_p("%s/log/marathon" % workdir)
+  mkdir_p("%s/log/zk" % workdir)
+
+  mkdir_p("%s/var/mesos-master" % workdir)
+  mkdir_p("%s/var/mesos-slave" % workdir)
+  mkdir_p("%s/var/marathon" % workdir)
+  mkdir_p("%s/var/zk" % workdir)
+
+  mkdir_p("%s/devel" % workdir)
+
+def httpGet(url):
+  """
+  Plain, simple HTTP GET, to avoid dependencies to `requests`.
+  (Raises exception on error)
+  """
+  ctx = ssl.create_default_context()
+  ctx.check_hostname = False
+  ctx.verify_mode = ssl.CERT_NONE
+
+  return urllib.urlopen(url, context=ctx).read()
+
+def waitForUrl(url, proc, timeout=30):
+  """
+  Wait until the port becomes available
+  """
+  t = time.time() + timeout
+  while True:
+    try:
+      httpGet(url)
+      return True
+    except Exception as e:
+      pass
+
+    if proc and not proc.poll() is None:
+      return False
+
+    if time.time() > t:
+      return False
+
+    time.sleep(1.0)
+
+def collectDCOSVersions(config):
+  """
+  Fetch DC/OS versions
+  """
+
+  # Collect marathon package info
+  marathon = json.loads(httpGet('https://raw.githubusercontent.com/dcos/dcos/%s/packages/marathon/buildinfo.json' % dcos_version))
+
+  # (Very bad idea on extracting versions (breaks if package structure changes))
+  marathon_version = marathon['single_source']['url'].split('/')[4]
+
+  # Collect mesos package info
+  mesos = json.loads(httpGet('https://raw.githubusercontent.com/dcos/dcos/%s/packages/mesos/buildinfo.json' % dcos_version))
+
+  return config
+
+
+def printBanner(configName, config):
+  """
+  """
+
+  # Detect exposed ports
+  exposedPorts = []
+  if config['mesos_master_port']:
+    port = int(config['mesos_master_port'])
+    nodes = int(config['mesos_masters'])
+    exposedPorts.append("#  - Mesos master     : %s" % ', '.join(map(str, range(port, port + nodes))))
+  if config['mesos_slave_port']:
+    port = int(config['mesos_slave_port'])
+    nodes = int(config['mesos_slaves'])
+    exposedPorts.append("#  - Mesos agent      : %s" % ', '.join(map(str, range(port, port + nodes))))
+  if config['marathon_port']:
+    port = int(config['marathon_port'])
+    nodes = int(config['marathon_nodes'])
+    exposedPorts.append("#  - Marathon         : %s" % ', '.join(map(str, range(port, port + nodes))))
+  if config['marathon_debug']:
+    port = int(config['marathon_debug'])
+    nodes = int(config['marathon_nodes'])
+    exposedPorts.append("#  - Marathon (Debug) : %s" % ', '.join(map(str, range(port, port + nodes))))
+  if config['zookeeper_port']:
+    port = int(config['zookeeper_port'])
+    nodes = int(config['zookeeper_nodes'])
+    exposedPorts.append("#  - Zookeeper        : %s" % ', '.join(map(str, range(port, port + nodes))))
+
+  print("##################################################")
+  print("# Starting local cluster '%s'" % (configName,))
+  print("# -----------------------------------------------")
+  print("#")
+  print("# Versions:")
+  print("#  - Mesos Version     : %(mesos)s" % config)
+  print("#  - Marathon Version  : %(marathon)s" % config)
+  print("#  - Zookeeper Version : %(zookeeper)s" % config)
+  print("#")
+  print("# Nodes:")
+  print("#  - Mesos master(s)   : %(mesos_masters)s" % config)
+  print("#  - Mesos agent(s)    : %(mesos_slaves)s" % config)
+  print("#  - Marathon node(s)  : %(marathon_nodes)s" % config)
+  print("#  - Zookeeper node(s) : %(zookeeper_nodes)s" % config)
+  print("#")
+  if len(exposedPorts) > 0:
+    print("# Exposed ports from the cluster:")
+    print("\n".join(exposedPorts))
+    print("#")
+  if config['mesos_resources_cpus'] or config['mesos_resources_gpus'] \
+     or config['mesos_resources_mem'] or config['mesos_resources_disk']:
+    print("# Provision mesos slaves with resources:")
+    if config['mesos_resources_cpus']:
+      print("#  - Virtual CPUs      : %(mesos_resources_cpus)s" % config)
+    if config['mesos_resources_gpus']:
+      print("#  - Virtual GPUs      : %(mesos_resources_gpus)s" % config)
+    if config['mesos_resources_mem']:
+      print("#  - Virtual Memory    : %(mesos_resources_mem)s" % config)
+    if config['mesos_resources_disk']:
+      print("#  - Virtual Disk      : %(mesos_resources_disk)s" % config)
+  print("#")
+  print("# -----------------------------------------------")
+  print("# HINT: Use `--reset` to reset the cluster state")
+  print("##################################################")
+
+def createCompose(workdir, config):
+  """
+  Create docker compose yml configuration
+  """
+
+  with open("%s/docker-compose.yml" % workdir, "w") as f:
+
+    # Compose zookeeper nodes
+    zk_lines = []
+    zk_depends = []
+    zk_nodes = ''
+    zk_servers = ''
+    for i in range(0, int(config['zookeeper_nodes'])):
+      if zk_servers:
+        zk_servers += ' '
+      zk_servers += 'server.%i=zookeeper_%i:2888:3888' % ((i+1), (i+1))
+    for i in range(0, int(config['zookeeper_nodes'])):
+      if zk_nodes:
+        zk_nodes += ","
+      zk_nodes += "zookeeper_%i:2181" % (i+1)
+      zk_depends += [
+        "      - zookeeper_%i" % (i+1)
+      ]
+      zk_lines += [
+        "  zookeeper_%i:" % (i+1),
+        "    image: %(zookeeper_image)s:%(zookeeper)s" % config,
+        "    restart: on-failure",
+        "    environment:",
+        "      ZOO_MY_ID: %i" % (i+1),
+        "      ZOO_SERVERS: %s" % zk_servers
+      ]
+      if config['zookeeper_port']:
+        zk_lines += [
+          "    ports:",
+          "      - '%i:2181'" % (int(config['zookeeper_port']) + i)
+        ]
+      zk_lines += [ "" ]
+
+    # Compose mesos masters
+    mesos_master_lines = []
+    masters_depends = []
+    for i in range(0, int(config['mesos_masters'])):
+      mesos_ports = []
+      if config['mesos_master_port']:
+        mesos_ports += [
+          "    ports:",
+          "      - '%i:5050'" % (int(config['mesos_master_port']) + i)
+        ]
+      masters_depends += [
+        "      - mesos_master_%i" % (i+1)
+      ]
+      mesos_master_lines += [
+        "  mesos_master_%i:" % (i+1),
+        "    image: %(mesos_image)s:%(mesos)s" % config,
+        "    restart: on-failure",
+      ] + mesos_ports + [
+        "    depends_on:",
+      ] + zk_depends + [
+        "    environment:",
+        "      MESOS_PORT: 5050",
+        "      MESOS_ZK: zk://%s/mesos" % zk_nodes,
+        "      MESOS_QUORUM: %(mesos_masters)s" % config,
+        "      MESOS_REGISTRY: in_memory",
+        "      MESOS_LOG_DIR: /var/log/mesos",
+        "      MESOS_WORK_DIR: /var/tmp/mesos",
+        "    entrypoint:",
+        "      - /usr/sbin/mesos-master",
+        "    volumes:",
+        "      - '%s/log/mesos-master:/var/log/mesos'" % workdir,
+        "      - '%s/var/mesos-master:/var/tmp/mesos'" % workdir,
+        ""
+      ]
+
+    # Compose mesos slaves
+    mesos_slave_lines = []
+    for i in range(0, int(config['mesos_slaves'])):
+
+      # Compile mesos ports
+      mesos_ports = []
+      if config['mesos_slave_port']:
+        mesos_ports += [
+          "    ports:",
+          "      - '%i:5050'" % (int(config['mesos_slave_port']) + i)
+        ]
+
+      # Compile mesos resources string
+      mesos_resources = []
+      if config['mesos_resources_cpus']:
+        mesos_resources.append("cpus:%s" % config['mesos_resources_cpus'])
+      if config['mesos_resources_gpus']:
+        mesos_resources.append("gpus:%s" % config['mesos_resources_gpus'])
+      if config['mesos_resources_mem']:
+        mesos_resources.append("mem:%s" % config['mesos_resources_mem'])
+      if config['mesos_resources_disk']:
+        mesos_resources.append("disk:%s" % config['mesos_resources_disk'])
+
+      # Compile cofig lines
+      mesos_slave_lines += [
+        "  mesos_slave_%i:" % (i+1),
+        "    image: %(mesos_image)s:%(mesos)s" % config,
+        "    restart: on-failure",
+        "    privileged: true",
+      ] + mesos_ports + [
+        "    depends_on:",
+      ] + masters_depends + [
+        "    environment:",
+        "      MESOS_PORT: 5050",
+        "      MESOS_MASTER: zk://%s/mesos" % zk_nodes,
+        "      MESOS_SWITCH_USER: 0",
+        "      MESOS_CONTAINERIZERS: docker,mesos",
+        "      MESOS_LOG_DIR: /var/log/mesos",
+        "      MESOS_WORK_DIR: /var/tmp/mesos",
+        "      MESOS_SYSTEMD_ENABLE_SUPPORT: 0",
+        "    entrypoint:",
+        "      - /usr/sbin/mesos-slave",
+        "      - --launcher=posix",
+      ] + ([] if not mesos_resources else [
+        "      - --resources=%s" % ';'.join(mesos_resources)
+      ]) + [
+        "    volumes:",
+        "      - '%s/log/mesos-slave:/var/log/mesos'" % workdir,
+        "      - '%s/var/mesos-slave:/var/tmp/mesos'" % workdir,
+        "      - '/var/run/docker.sock:/var/run/docker.sock'",
+        ""
+      ]
+
+    # Compose marathon lines
+    marathon_lines = []
+    for i in range(0, int(config['marathon_nodes'])):
+
+      # Prepare marathon ports
+      marathon_ports = []
+      marathon_args = []
+      if config['marathon_port']:
+        marathon_ports.append("      - '%i:8080'" % (int(config['marathon_port'])+i))
+      if config['marathon_args']:
+        for arg in shlex.split(config['marathon_args']):
+          marathon_args.append("      - '%s'" % arg.split("'", "\\'"))
+      if config['marathon_debug']:
+        marathon_args.append("      - '--jvm-debug'")
+        marathon_args.append("      - '1050'" % config)
+        marathon_ports.append("      - '%i:1050'" % (int(config['marathon_debug'])+i))
+      if marathon_ports:
+        marathon_ports = [
+          "    ports:"
+        ] + marathon_ports
+
+      # Prepare marathon lines
+      marathon_lines += [
+        "  marathon_%i:" % (i+1),
+        "    image: %(marathon_image)s:%(marathon)s" % config,
+        "    restart: on-failure",
+        "    depends_on:",
+      ] + masters_depends \
+        + zk_depends \
+        + marathon_ports + [
+        "    environment:",
+        "      MARATHON_MASTER: zk://%s/mesos" % zk_nodes,
+        "      MARATHON_ZK: zk://%s/marathon" % zk_nodes,
+        "    entrypoint:",
+        "      - ./bin/start",
+      ] + marathon_args + [ "" ]
+
+    # Compose lines
+    lines = [
+      "version: '3'",
+      "services:",
+      "",
+    ] + zk_lines \
+      + mesos_master_lines \
+      + mesos_slave_lines \
+      + marathon_lines
+
+    # Write down config
+    f.write('\n'.join(lines))
+
+
+if __name__ == "__main__":
+
+  # Locate docker-compose
+  dockerComposeBin = distutils.spawn.find_executable('docker-compose')
+  if dockerComposeBin is None:
+    die("Could not locate required `docker-compose` binary")
+
+  # Default parameters
+  default_config = {
+    'mesos': None,
+    'mesos_image': 'mesosphere/mesos',
+    'mesos_master_port': None,
+    'mesos_slave_port': None,
+    'mesos_slaves': '1',
+    'mesos_masters': '1',
+
+    'marathon': None,
+    'marathon_args': None,
+    'marathon_debug': None,
+    'marathon_image': 'mesosphere/marathon',
+    'marathon_port': None,
+    'marathon_nodes': '1',
+
+    'zookeeper': '3.4',
+    'zookeeper_nodes': '1',
+    'zookeeper_image': 'zookeeper',
+    'zookeeper_port': None,
+
+    'mesos_resources_cpus': None,
+    'mesos_resources_gpus': None,
+    'mesos_resources_mem': None,
+    'mesos_resources_disk': None,
+  }
+
+  # Parse arguments
+  parser = argparse.ArgumentParser(
+    description='Launches a debugging-purpose local mesos+arathon cluster')
+  parser.add_argument(
+    'config', type=str, help='load parameter values from the given configuration file')
+  parser.add_argument(
+    '--rm',
+    dest='remove',
+    action='store_const',
+    const=True,
+    default=False,
+    help='remove the environment with the given config')
+  parser.add_argument(
+    '--reset',
+    dest='reset',
+    action='store_const',
+    const=True,
+    default=False,
+    help='clear var directories')
+  for arg, default in default_config.items():
+    parser.add_argument(
+      '--%s' % arg,
+      nargs='?',
+      default=default,
+      help='override %s value (Default: %r)' % (arg, default))
+
+  # Parse arguments
+  args = parser.parse_args()
+  if not os.path.isfile(args.config):
+    die("The specified environment file does not exist")
+
+  # Apply the cli-overriden arguments
+  for arg, default in default_config.items():
+    default_config[arg] = getattr(args, arg)
+
+  # Configure environment
+  config = loadConfig(args.config, default_config)
+
+  # Require some versions
+  if config['mesos'] is None:
+    die("You must specify the mesos version to use!")
+  if config['marathon'] is None:
+    die("You must specify the marathon version to use!")
+  if int(config['mesos_masters']) % 2 == 0:
+    die("You must specify an odd number of masters!")
+
+  # Extract filename from the config
+  (name, ext) = os.path.splitext(os.path.basename(args.config))
+  workdir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'workdir', '%s-s%s-m%s' % (name, config['mesos'], config['marathon'])))
+
+  # Check if we should reset the directories
+  if args.reset:
+    rm_r("%s/var" % workdir)
+
+  # Print banner
+  printBanner(name, config)
+
+  # Prepare structure
+  prepareWorkdir(workdir)
+  createCompose(workdir, config)
+
+  # If we are asked to remove traces, take everything down
+  if args.remove:
+
+    # Run docker-compose down to tear down possibly running instances
+    composer = subprocess.Popen([dockerComposeBin, 'down'], cwd=workdir)
+    composer.wait()
+
+    # Nuke directory
+    print("INFO: Cleaning-up directory %s" % workdir)
+    rm_r(workdir)
+
+    sys.exit(0)
+
+  # Run and register a teardown hook
+  composer = None
+  def teardown_handler(signum, frame):
+    global composer
+
+    # Interrupt and stop after 10 seconds
+    time.sleep(1)
+    composer.send_signal(signal.SIGINT)
+    timeout = time.time() + 10
+    while True:
+      if not composer.poll() is None:
+        break
+      if time.time() > timeout:
+        composer.kill()
+        break
+      time.sleep(0.1)
+    composer.wait()
+
+    # Kill composition
+    composer = subprocess.Popen([dockerComposeBin, 'kill'], cwd=workdir)
+    composer.wait()
+
+    # Teardown composition
+    composer = subprocess.Popen([dockerComposeBin, 'down'], cwd=workdir)
+    composer.wait()
+
+    # Exit
+    sys.exit(0)
+
+  signal.signal(signal.SIGINT, teardown_handler)
+
+  # Wait proc
+  composer = subprocess.Popen([dockerComposeBin, 'up'], cwd=workdir)
+
+  # Wait for UI port if specified
+  if config['marathon_port']:
+    url = 'http://127.0.0.1:%(marathon_port)s' % config
+    if waitForUrl(url, composer):
+      webbrowser.open_new_tab(url)
+
+  # Wait for main proc to exit
+  composer.wait()
+
