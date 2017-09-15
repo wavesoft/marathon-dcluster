@@ -374,13 +374,13 @@ def createCompose(workdir, config):
 
       # If we have a marathon_repo specified, point docker-compose to build
       # an image from the specified repository
-      if 'marathon_repo' in config:
+      if config['marathon_repo'] is None:
         marathon_lines += [
-          "    build: %(marathon_repo)s" % config
+          "    image: %(marathon_image)s:%(marathon)s" % config
         ]
       else:
         marathon_lines += [
-          "    image: %(marathon_image)s:%(marathon)s" % config
+          "    build: %(marathon_repo)s" % config
         ]
 
       marathon_lines += [
@@ -491,6 +491,7 @@ if __name__ == "__main__":
   for arg, default in default_config.items():
     value = getattr(args, arg)
     if not value is None:
+      print("Override %r with %r" % (arg, value))
       config[arg] = value
 
   # Require some versions
