@@ -24,10 +24,14 @@ import time
 import urllib
 import webbrowser
 
+# Find the correct urllib version according to your set-up
 try:
-  import urllib2 as urllib
+  import urllib3 as urllib
 except ModuleNotFoundError:
-  import urllib.request as urllib
+  try:
+    import urllib2 as urllib
+  except ModuleNotFoundError:
+    import urllib.request as urllib
 
 SPLIT_EQ = re.compile(r'\s*=\s*')
 
@@ -165,6 +169,10 @@ def printBanner(configName, config):
     port = int(config['marathon_debug'])
     nodes = int(config['marathon_nodes'])
     exposedPorts.append("#  - Marathon (Debug) : %s" % ', '.join(map(str, range(port, port + nodes))))
+  if config['marathon_jmx']:
+    port = int(config['marathon_jmx'])
+    nodes = int(config['marathon_nodes'])
+    exposedPorts.append("#  - Marathon (JMX)   : %s" % ', '.join(map(str, range(port, port + nodes))))
   if config['zookeeper_port']:
     port = int(config['zookeeper_port'])
     nodes = int(config['zookeeper_nodes'])
@@ -347,6 +355,13 @@ def createCompose(workdir, config):
         marathon_args.append("      - '--jvm-debug'")
         marathon_args.append("      - '1050'" % config)
         marathon_ports.append("      - '%i:1050'" % (int(config['marathon_debug'])+i))
+      if config['marathon_jmx']:
+        marathon_args.append("      - '-Dcom.sun.management.jmxremote'")
+        marathon_args.append("      - '-Dcom.sun.management.jmxremote.port=9010'")
+        marathon_args.append("      - '-Dcom.sun.management.jmxremote.local.only=false'")
+        marathon_args.append("      - '-Dcom.sun.management.jmxremote.authenticate=false'")
+        marathon_args.append("      - '-Dcom.sun.management.jmxremote.ssl=false'")
+        marathon_ports.append("      - '%i:9010'" % (int(config['marathon_jmx'])+i))
       if marathon_ports:
         marathon_ports = [
           "    ports:"
@@ -404,6 +419,7 @@ if __name__ == "__main__":
     'marathon_image': 'mesosphere/marathon',
     'marathon_port': None,
     'marathon_nodes': '1',
+    'marathon_jmx': None,
 
     'zookeeper': '3.4',
     'zookeeper_nodes': '1',
@@ -421,6 +437,13 @@ if __name__ == "__main__":
     description='Launches a debugging-purpose local mesos+arathon cluster')
   parser.add_argument(
     'config', type=str, help='load parameter values from the given configuration file')
+  parser.add_argument(
+    '--detach',
+    dest='detach',
+    action='store_const',
+    const=True,
+    default=False,
+    help='spin a cluster and exit')
   parser.add_argument(
     '--rm',
     dest='remove',
@@ -522,7 +545,10 @@ if __name__ == "__main__":
   signal.signal(signal.SIGINT, teardown_handler)
 
   # Wait proc
-  composer = subprocess.Popen([dockerComposeBin, 'up'], cwd=workdir)
+  compose_args = []
+  if args.detach:
+    compose_args += [ '-d' ]
+  composer = subprocess.Popen([dockerComposeBin, 'up'] + compose_args, cwd=workdir)
 
   # Wait for UI port if specified
   if config['marathon_port']:
