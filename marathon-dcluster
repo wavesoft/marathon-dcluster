@@ -213,6 +213,25 @@ def printBanner(configName, config):
   print("# HINT: Use `--reset` to reset the cluster state")
   print("##################################################")
 
+
+def collectVolumeLinesForHacks(hackDir):
+  """
+  Collect all hacks from the given directory and force them into the docker image
+  """
+  lines = []
+  stripchars = len(hackDir)
+  for (dirpath, dirnames, filenames) in os.walk(hackDir):
+    relpath = dirpath[stripchars:]
+    if not relpath or relpath[0] != '/':
+      relpath = '/' + relpath
+    if len(filenames):
+      for filename in filenames:
+        lines.append(
+          "      - '%s/%s:%s/%s'" % (dirpath, filename, relpath, filename)
+        )
+  return lines
+
+
 def createCompose(workdir, config):
   """
   Create docker compose yml configuration
@@ -279,7 +298,9 @@ def createCompose(workdir, config):
         "      MESOS_LOG_DIR: /var/log/mesos",
         "      MESOS_WORK_DIR: /var/tmp/mesos",
         "    entrypoint:",
-        "      - /usr/sbin/mesos-master",
+        "      - /bin/bash",
+        "      - '-c'",
+        "      - 'while true; do /usr/sbin/mesos-master; echo Master killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'",
         "    volumes:",
         "      - '%s/log/mesos-master:/var/log/mesos'" % workdir,
         "      - '%s/var/mesos-master:/var/tmp/mesos'" % workdir,
@@ -327,11 +348,11 @@ def createCompose(workdir, config):
         "      MESOS_WORK_DIR: /var/tmp/mesos",
         "      MESOS_SYSTEMD_ENABLE_SUPPORT: 0",
         "    entrypoint:",
-        "      - /usr/sbin/mesos-slave",
-        "      - --launcher=posix",
-      ] + ([] if not mesos_resources else [
-        "      - --resources=%s" % ';'.join(mesos_resources)
-      ]) + [
+        "      - /bin/bash",
+        "      - '-c'",
+        "      - 'while true; do rm -f /var/tmp/mesos/meta/slaves/latest; /usr/sbin/mesos-slave --launcher=posix {}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
+                  "" if not mesos_resources else "--resources=\"{}\"".format(';'.join(mesos_resources))
+                ),
         "    volumes:",
         "      - '%s/log/mesos-slave:/var/log/mesos'" % workdir,
         "      - '%s/var/mesos-slave:/var/tmp/mesos'" % workdir,
@@ -383,17 +404,27 @@ def createCompose(workdir, config):
           "    build: %(marathon_repo)s" % config
         ]
 
+      # Mount hacked files
+      marathon_volumes = []
+      if config['marathon_hacks']:
+        marathon_volumes = collectVolumeLinesForHacks(config['marathon_hacks'])
+        if len(marathon_volumes):
+          marathon_volumes = [
+            "    volumes:"
+          ] + marathon_volumes
+
       marathon_lines += [
         "    restart: on-failure",
         "    depends_on:",
       ] + masters_depends \
         + zk_depends \
+        + marathon_volumes \
         + marathon_ports + [
-        "    environment:",
-        "      MARATHON_MASTER: zk://%s/mesos" % zk_nodes,
-        "      MARATHON_ZK: zk://%s/marathon" % zk_nodes,
-        "    entrypoint:",
-        "      - ./bin/start",
+        "    command:",
+        "      - '--master'",
+        "      - 'zk://%s/mesos'" % zk_nodes,
+        "      - '--zk'",
+        "      - 'zk://%s/marathon'" % zk_nodes,
       ] + marathon_args + [ "" ]
 
     # Compose lines
@@ -434,6 +465,7 @@ if __name__ == "__main__":
     'marathon_nodes': '1',
     'marathon_jmx': None,
     'marathon_repo': None,
+    'marathon_hacks': None,
 
     'zookeeper': '3.4',
     'zookeeper_nodes': '1',
@@ -452,7 +484,7 @@ if __name__ == "__main__":
   parser.add_argument(
     'config', type=str, help='load parameter values from the given configuration file')
   parser.add_argument(
-    '--detach',
+    '-d', '--detach',
     dest='detach',
     action='store_const',
     const=True,
@@ -472,6 +504,11 @@ if __name__ == "__main__":
     const=True,
     default=False,
     help='clear var directories')
+  parser.add_argument(
+    '--docker-compose',
+    dest='docker_compose',
+    default=None,
+    help='Run a docker-compose command (ex. "restart mesos_1")')
   for arg, default in default_config.items():
     parser.add_argument(
       '--%s' % arg,
@@ -506,6 +543,12 @@ if __name__ == "__main__":
   (name, ext) = os.path.splitext(os.path.basename(args.config))
   workdir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'workdir', '%s-s%s-m%s' % (name, config['mesos'], config['marathon'])))
 
+  # Check for high-level actions
+  if args.docker_compose:
+    composer = subprocess.Popen([dockerComposeBin] + shlex.split(args.docker_compose), cwd=workdir)
+    composer.wait()
+    sys.exit(0)
+
   # Check if we should reset the directories
   if args.reset:
     rm_r("%s/var" % workdir)
@@ -519,6 +562,10 @@ if __name__ == "__main__":
 
   # If we are asked to remove traces, take everything down
   if args.remove:
+
+    # Kill cluster
+    composer = subprocess.Popen([dockerComposeBin, 'kill'], cwd=workdir)
+    composer.wait()
 
     # Run docker-compose down to tear down possibly running instances
     composer = subprocess.Popen([dockerComposeBin, 'down'], cwd=workdir)
