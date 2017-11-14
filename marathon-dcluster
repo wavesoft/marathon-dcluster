@@ -427,6 +427,18 @@ def createCompose(workdir, config):
         "      - 'zk://%s/marathon'" % zk_nodes,
       ] + marathon_args + [ "" ]
 
+
+    # Compose network lines
+    networks_lines = []
+    if not config['docker_network'] is None:
+      # Use external network if told to do so
+      networks_lines += [
+      'networks:',
+      '  default:',
+      '    external:',
+      '      name: %s' % config['docker_network'],
+      ]
+
     # Compose lines
     lines = [
       "version: '3'",
@@ -435,7 +447,8 @@ def createCompose(workdir, config):
     ] + zk_lines \
       + mesos_master_lines \
       + mesos_slave_lines \
-      + marathon_lines
+      + marathon_lines \
+      + networks_lines
 
     # Write down config
     f.write('\n'.join(lines))
@@ -476,6 +489,8 @@ if __name__ == "__main__":
     'mesos_resources_gpus': None,
     'mesos_resources_mem': None,
     'mesos_resources_disk': None,
+
+    'docker_network': None
   }
 
   # Parse arguments
