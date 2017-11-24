@@ -583,8 +583,6 @@ if __name__ == "__main__":
   if int(config['mesos_masters']) % 2 == 0:
     die("You must specify an odd number of masters!")
 
-  print(config)
-
   # Extract filename from the config
   (name, ext) = os.path.splitext(os.path.basename(args.config))
   workdir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'workdir', '%s-s%s-m%s' % (name, config['mesos'], config['marathon'])))
