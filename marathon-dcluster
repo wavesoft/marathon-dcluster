@@ -70,7 +70,7 @@ def loadConfig(filename, defaults={}):
   """
   Load environment config from the given file
   """
-  config = defaults
+  config = dict(defaults)
   with open(filename, 'r') as f:
     for line in f:
       line = line.strip()
@@ -78,6 +78,8 @@ def loadConfig(filename, defaults={}):
         continue
 
       (key, value) = SPLIT_EQ.split(line)
+      if type(defaults.get(key, None)) is bool:
+        value = (value == "true") or (value == "yes") or (value == "1")
       config[key] = value
 
   return config
@@ -270,6 +272,19 @@ def createCompose(workdir, config):
         ]
       zk_lines += [ "" ]
 
+    # Compose mesos volumes
+    mesos_volumes = []
+    if config['mesos_mount_log']:
+      mesos_volumes += [ "%s/log/mesos-master:/var/log/mesos" % workdir ]
+    if config['mesos_mount_workdir']:
+      mesos_volumes += [ "%s/var/mesos-master:/var/tmp/mesos" % workdir ]
+    if config['mesos_isolation'] == 'docker':
+      mesos_volumes += [ "/var/run/docker.sock:/var/run/docker.sock" ]
+    if len(mesos_volumes):
+      mesos_volumes = [
+        "    volumes:",
+      ] + list(map(lambda x: "      - '%s'" % x, mesos_volumes))
+
     # Compose mesos masters
     mesos_master_lines = []
     masters_depends = []
@@ -302,12 +317,8 @@ def createCompose(workdir, config):
         "      - '-c'",
         "      - 'while true; do /usr/sbin/mesos-master {}; echo Master killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
                   "" if config['mesos_master_args'] is None else (' ' + config['mesos_master_args'].replace("%i", str(i+1)))
-                ),
-        "    volumes:",
-        "      - '%s/log/mesos-master:/var/log/mesos'" % workdir,
-        "      - '%s/var/mesos-master:/var/tmp/mesos'" % workdir,
-        ""
-      ]
+                )
+      ] + mesos_volumes
 
     # Compose mesos slaves
     mesos_slave_lines = []
@@ -332,6 +343,17 @@ def createCompose(workdir, config):
       if config['mesos_resources_disk']:
         mesos_resources.append("disk:%s" % config['mesos_resources_disk'])
 
+      # Isolator-specific arguments
+      mesos_isolator_env = []
+      mesos_isolator_args = ""
+      if config['mesos_isolation'] == 'posix':
+        mesos_isolator_args = "--launcher=posix"
+      elif config['mmesos_isolation'] == 'docker':
+        mesos_isolator_args = "--image_providers=appc,docker --launcher=linux"
+        mesos_isolator_env = [
+          "      MESOS_ISOLATION: cgroups/cpu,cgroups/mem,cgroups/blkio,disk/du,network/cni,filesystem/linux,docker/runtime,volume/sandbox_path,volume/secret,posix/rlimits,namespaces/pid,linux/capabilities",
+        ]
+
       # Compile cofig lines
       mesos_slave_lines += [
         "  mesos_slave_%i:" % (i+1),
@@ -348,20 +370,17 @@ def createCompose(workdir, config):
         "      MESOS_CONTAINERIZERS: docker,mesos",
         "      MESOS_LOG_DIR: /var/log/mesos",
         "      MESOS_WORK_DIR: /var/tmp/mesos",
-        "      MESOS_SYSTEMD_ENABLE_SUPPORT: 0",
+        "      MESOS_SYSTEMD_ENABLE_SUPPORT: 0"
+      ] + mesos_isolator_env + [
         "    entrypoint:",
         "      - /bin/bash",
         "      - '-c'",
-        "      - 'while true; do rm -f /var/tmp/mesos/meta/slaves/latest; /usr/sbin/mesos-slave --launcher=posix{}{}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
+        "      - 'while true; do rm -f /var/tmp/mesos/meta/slaves/latest; /usr/sbin/mesos-slave {}{}{}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
+                  mesos_isolator_args,
                   "" if not mesos_resources else " --resources=\"{}\"".format(';'.join(mesos_resources)),
                   "" if config['mesos_slave_args'] is None else (' ' + config['mesos_slave_args'].replace("%i", str(i+1)))
-                ),
-        "    volumes:",
-        "      - '%s/log/mesos-slave:/var/log/mesos'" % workdir,
-        "      - '%s/var/mesos-slave:/var/tmp/mesos'" % workdir,
-        "      - '/var/run/docker.sock:/var/run/docker.sock'",
-        ""
-      ]
+                )
+      ] + mesos_volumes
 
     # Compose marathon lines
     marathon_lines = []
@@ -474,6 +493,9 @@ if __name__ == "__main__":
     'mesos_slave_args': None,
     'mesos_slaves': '1',
     'mesos_masters': '1',
+    'mesos_mount_log': True,
+    'mesos_mount_workdir': False,
+    'mesos_isolation': 'posix',
 
     'marathon': None,
     'marathon_args': None,
@@ -548,6 +570,8 @@ if __name__ == "__main__":
   for arg, default in default_config.items():
     value = getattr(args, arg)
     if not value is None:
+      if type(default_config.get(arg, None)) is bool:
+        value = (value == "true") or (value == "yes") or (value == "1")
       print("Override %r with %r" % (arg, value))
       config[arg] = value
 
@@ -558,6 +582,8 @@ if __name__ == "__main__":
     die("You must specify the marathon version to use!")
   if int(config['mesos_masters']) % 2 == 0:
     die("You must specify an odd number of masters!")
+
+  print(config)
 
   # Extract filename from the config
   (name, ext) = os.path.splitext(os.path.basename(args.config))
@@ -599,8 +625,10 @@ if __name__ == "__main__":
 
   # Run and register a teardown hook
   composer = None
+  default_sigint_handler = None
   def teardown_handler(signum, frame):
     global composer
+    signal.signal(signal.SIGINT, default_sigint_handler)
 
     # Interrupt and stop after 10 seconds
     time.sleep(1)
@@ -626,7 +654,7 @@ if __name__ == "__main__":
     # Exit
     sys.exit(0)
 
-  signal.signal(signal.SIGINT, teardown_handler)
+  default_sigint_handler = signal.signal(signal.SIGINT, teardown_handler)
 
   # Wait proc
   compose_args = []
