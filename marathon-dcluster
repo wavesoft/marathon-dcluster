@@ -273,17 +273,16 @@ def createCompose(workdir, config):
       zk_lines += [ "" ]
 
     # Compose mesos volumes
-    mesos_volumes = []
+    mesos_volumes = [
+      "/var/run/docker.sock:/var/run/docker.sock"
+    ]
     if config['mesos_mount_log']:
       mesos_volumes += [ "%s/log/mesos-master:/var/log/mesos" % workdir ]
     if config['mesos_mount_workdir']:
-      mesos_volumes += [ "%s/var/mesos-master:/var/tmp/mesos" % workdir ]
-    if config['mesos_isolation'] == 'docker':
-      mesos_volumes += [ "/var/run/docker.sock:/var/run/docker.sock" ]
-    if len(mesos_volumes):
-      mesos_volumes = [
-        "    volumes:",
-      ] + list(map(lambda x: "      - '%s'" % x, mesos_volumes))
+      mesos_volumes += [ "%s/var/mesos-master:/var/lib/mesos" % workdir ]
+    mesos_volumes = [
+      "    volumes:",
+    ] + list(map(lambda x: "      - '%s'" % x, mesos_volumes))
 
     # Compose mesos masters
     mesos_master_lines = []
@@ -311,14 +310,14 @@ def createCompose(workdir, config):
         "      MESOS_QUORUM: %(mesos_masters)s" % config,
         "      MESOS_REGISTRY: in_memory",
         "      MESOS_LOG_DIR: /var/log/mesos",
-        "      MESOS_WORK_DIR: /var/tmp/mesos",
+        "      MESOS_WORK_DIR: /var/lib/mesos",
         "    entrypoint:",
         "      - /bin/bash",
         "      - '-c'",
         "      - 'while true; do /usr/sbin/mesos-master {}; echo Master killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
                   "" if config['mesos_master_args'] is None else (' ' + config['mesos_master_args'].replace("%i", str(i+1)))
                 )
-      ] + mesos_volumes
+      ] + mesos_volumes + [ "" ]
 
     # Compose mesos slaves
     mesos_slave_lines = []
@@ -369,18 +368,18 @@ def createCompose(workdir, config):
         "      MESOS_SWITCH_USER: 0",
         "      MESOS_CONTAINERIZERS: docker,mesos",
         "      MESOS_LOG_DIR: /var/log/mesos",
-        "      MESOS_WORK_DIR: /var/tmp/mesos",
+        "      MESOS_WORK_DIR: /var/lib/mesos",
         "      MESOS_SYSTEMD_ENABLE_SUPPORT: 0"
       ] + mesos_isolator_env + [
         "    entrypoint:",
         "      - /bin/bash",
         "      - '-c'",
-        "      - 'while true; do rm -f /var/tmp/mesos/meta/slaves/latest; /usr/sbin/mesos-slave {}{}{}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
+        "      - 'while true; do rm -f /var/lib/mesos/meta/slaves/latest; /usr/sbin/mesos-slave {}{}{}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
                   mesos_isolator_args,
                   "" if not mesos_resources else " --resources=\"{}\"".format(';'.join(mesos_resources)),
                   "" if config['mesos_slave_args'] is None else (' ' + config['mesos_slave_args'].replace("%i", str(i+1)))
                 )
-      ] + mesos_volumes
+      ] + mesos_volumes + [ "" ]
 
     # Compose marathon lines
     marathon_lines = []
