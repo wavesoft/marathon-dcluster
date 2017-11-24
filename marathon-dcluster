@@ -300,7 +300,9 @@ def createCompose(workdir, config):
         "    entrypoint:",
         "      - /bin/bash",
         "      - '-c'",
-        "      - 'while true; do /usr/sbin/mesos-master; echo Master killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'",
+        "      - 'while true; do /usr/sbin/mesos-master {}; echo Master killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
+                  "" if config['mesos_master_args'] is None else (' ' + config['mesos_master_args'].replace("%i", str(i+1)))
+                ),
         "    volumes:",
         "      - '%s/log/mesos-master:/var/log/mesos'" % workdir,
         "      - '%s/var/mesos-master:/var/tmp/mesos'" % workdir,
@@ -350,8 +352,9 @@ def createCompose(workdir, config):
         "    entrypoint:",
         "      - /bin/bash",
         "      - '-c'",
-        "      - 'while true; do rm -f /var/tmp/mesos/meta/slaves/latest; /usr/sbin/mesos-slave --launcher=posix {}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
-                  "" if not mesos_resources else "--resources=\"{}\"".format(';'.join(mesos_resources))
+        "      - 'while true; do rm -f /var/tmp/mesos/meta/slaves/latest; /usr/sbin/mesos-slave --launcher=posix{}{}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
+                  "" if not mesos_resources else " --resources=\"{}\"".format(';'.join(mesos_resources)),
+                  "" if config['mesos_slave_args'] is None else (' ' + config['mesos_slave_args'].replace("%i", str(i+1)))
                 ),
         "    volumes:",
         "      - '%s/log/mesos-slave:/var/log/mesos'" % workdir,
@@ -467,6 +470,8 @@ if __name__ == "__main__":
     'mesos_image': 'mesosphere/mesos',
     'mesos_master_port': None,
     'mesos_slave_port': None,
+    'mesos_master_args': None,
+    'mesos_slave_args': None,
     'mesos_slaves': '1',
     'mesos_masters': '1',
 
