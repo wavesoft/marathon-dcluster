@@ -404,7 +404,7 @@ def createCompose(workdir, config):
         marathon_args.append("      - '-Dcom.sun.management.jmxremote.local.only=false'")
         marathon_args.append("      - '-Dcom.sun.management.jmxremote.authenticate=false'")
         marathon_args.append("      - '-Dcom.sun.management.jmxremote.ssl=false'")
-        marathon_args.append("      - '-Djava.rmi.server.hostname=127.0.0.1'")
+        marathon_args.append("      - '-Djava.rmi.server.hostname=0.0.0.0'")
         marathon_ports.append("      - '%i:9010'" % (int(config['marathon_jmx'])+i))
       if marathon_ports:
         marathon_ports = [
