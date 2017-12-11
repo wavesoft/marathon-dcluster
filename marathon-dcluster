@@ -392,7 +392,7 @@ def createCompose(workdir, config):
         marathon_ports.append("      - '%i:8080'" % (int(config['marathon_port'])+i))
       if config['marathon_args']:
         for arg in shlex.split(config['marathon_args']):
-          marathon_args.append("      - '%s'" % arg.split("'", "\\'"))
+          marathon_args.append("      - '%s'" % str(arg).replace("'", "\\'"))
       if config['marathon_debug']:
         marathon_args.append("      - '--jvm-debug'")
         marathon_args.append("      - '1050'" % config)
