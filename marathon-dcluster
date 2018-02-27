@@ -276,6 +276,12 @@ def createCompose(workdir, config):
         "      ZOO_MY_ID: %i" % (i+1),
         "      ZOO_SERVERS: %s" % zk_servers
       ]
+      if config['zookeeper_tmpfs']:
+        zk_lines += [
+          "    tmpfs:",
+          "      - /data",
+          "      - /datalog"
+        ]
       if config['zookeeper_port']:
         zk_lines += [
           "    ports:",
@@ -487,7 +493,7 @@ def createCompose(workdir, config):
 
     # Compose lines
     lines = [
-      "version: '3'",
+      "version: '{}'".format('3.6' if config['zookeeper_tmpfs'] else '3'),
       "services:",
       "",
     ] + zk_lines \
@@ -538,6 +544,7 @@ if __name__ == "__main__":
     'zookeeper_nodes': '1',
     'zookeeper_image': 'zookeeper',
     'zookeeper_port': None,
+    'zookeeper_tmpfs': False,
 
     'mesos_resources_cpus': None,
     'mesos_resources_gpus': None,
