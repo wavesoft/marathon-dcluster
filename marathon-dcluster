@@ -493,7 +493,7 @@ def createCompose(workdir, config):
 
     # Compose lines
     lines = [
-      "version: '{}'".format('3.6' if config['zookeeper_tmpfs'] else '3'),
+      "version: '3'",
       "services:",
       "",
     ] + zk_lines \
