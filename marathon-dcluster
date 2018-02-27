@@ -77,7 +77,7 @@ def loadConfig(filename, defaults={}):
       if not line or line[0] == "#":
         continue
 
-      (key, value) = SPLIT_EQ.split(line)
+      (key, value) = SPLIT_EQ.split(line, 1)
       if type(defaults.get(key, None)) is bool:
         value = (value == "true") or (value == "yes") or (value == "1")
       config[key] = value
@@ -109,7 +109,6 @@ def httpGet(url):
   ctx = ssl.create_default_context()
   ctx.check_hostname = False
   ctx.verify_mode = ssl.CERT_NONE
-
   return urllib.urlopen(url, context=ctx).read()
 
 def waitForUrl(url, proc, timeout=30):
@@ -131,22 +130,6 @@ def waitForUrl(url, proc, timeout=30):
       return False
 
     time.sleep(1.0)
-
-def collectDCOSVersions(config):
-  """
-  Fetch DC/OS versions
-  """
-
-  # Collect marathon package info
-  marathon = json.loads(httpGet('https://raw.githubusercontent.com/dcos/dcos/%s/packages/marathon/buildinfo.json' % dcos_version))
-
-  # (Very bad idea on extracting versions (breaks if package structure changes))
-  marathon_version = marathon['single_source']['url'].split('/')[4]
-
-  # Collect mesos package info
-  mesos = json.loads(httpGet('https://raw.githubusercontent.com/dcos/dcos/%s/packages/mesos/buildinfo.json' % dcos_version))
-
-  return config
 
 
 def printBanner(configName, config):
@@ -221,6 +204,11 @@ def collectVolumeLinesForHacks(hackDir):
   Collect all hacks from the given directory and force them into the docker image
   """
   lines = []
+
+  # Prefix relative dirs
+  if hackDir.startswith('./'):
+    hackDir = os.path.dirname(os.path.realpath(__file__)) + hackDir[1:]
+
   stripchars = len(hackDir)
   for (dirpath, dirnames, filenames) in os.walk(hackDir):
     relpath = dirpath[stripchars:]
@@ -284,6 +272,14 @@ def createCompose(workdir, config):
       "    volumes:",
     ] + list(map(lambda x: "      - '%s'" % x, mesos_volumes))
 
+    # Mount hacked files
+    mesos_master_volumes = []
+    if config['mesos_master_files']:
+      mesos_master_volumes = collectVolumeLinesForHacks(config['mesos_master_files'])
+    mesos_slave_volumes = []
+    if config['mesos_slave_files']:
+      mesos_slave_volumes = collectVolumeLinesForHacks(config['mesos_slave_files'])
+
     # Compose mesos masters
     mesos_master_lines = []
     masters_depends = []
@@ -314,10 +310,12 @@ def createCompose(workdir, config):
         "    entrypoint:",
         "      - /bin/bash",
         "      - '-c'",
-        "      - 'while true; do /usr/sbin/mesos-master {}; echo Master killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
-                  "" if config['mesos_master_args'] is None else (' ' + config['mesos_master_args'].replace("%i", str(i+1)))
+        "      - >-",
+        "        while true; do mesos-master {}{}; echo Master killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done".format(
+                  "" if config['mesos_master_args'] is None else (' ' + config['mesos_master_args'].replace("%i", str(i+1))),
+                  "" if not 'mesos_master_args['+str(i+1)+']' in config else (' ' + config['mesos_master_args['+str(i+1)+']'].replace("%i", str(i+1)))
                 )
-      ] + mesos_volumes + [ "" ]
+      ] + mesos_volumes + mesos_master_volumes + [ "" ]
 
     # Compose mesos slaves
     mesos_slave_lines = []
@@ -374,12 +372,14 @@ def createCompose(workdir, config):
         "    entrypoint:",
         "      - /bin/bash",
         "      - '-c'",
-        "      - 'while true; do rm -f /var/lib/mesos/meta/slaves/latest; /usr/sbin/mesos-slave {}{}{}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done'".format(
+        "      - >-",
+        "        while true; do rm -f /var/lib/mesos/meta/slaves/latest; mesos-slave {}{}{}{}; echo Agent killed, restarting; sleep $$(cat /kill-recovery 2>/dev/null || echo 30); done".format(
                   mesos_isolator_args,
                   "" if not mesos_resources else " --resources=\"{}\"".format(';'.join(mesos_resources)),
-                  "" if config['mesos_slave_args'] is None else (' ' + config['mesos_slave_args'].replace("%i", str(i+1)))
+                  "" if config['mesos_slave_args'] is None else (' ' + config['mesos_slave_args'].replace("%i", str(i+1))),
+                  "" if not 'mesos_slave_args['+str(i+1)+']' in config else (' ' + config['mesos_slave_args['+str(i+1)+']'].replace("%i", str(i+1)))
                 )
-      ] + mesos_volumes + [ "" ]
+      ] + mesos_volumes + mesos_slave_volumes + [ "" ]
 
     # Compose marathon lines
     marathon_lines = []
@@ -429,8 +429,8 @@ def createCompose(workdir, config):
 
       # Mount hacked files
       marathon_volumes = []
-      if config['marathon_hacks']:
-        marathon_volumes = collectVolumeLinesForHacks(config['marathon_hacks'])
+      if config['marathon_files']:
+        marathon_volumes = collectVolumeLinesForHacks(config['marathon_files'])
         if len(marathon_volumes):
           marathon_volumes = [
             "    volumes:"
@@ -497,6 +497,8 @@ if __name__ == "__main__":
     'mesos_mount_log': True,
     'mesos_mount_workdir': False,
     'mesos_isolation': 'posix',
+    'mesos_master_files': None,
+    'mesos_slave_files': None,
 
     'marathon': None,
     'marathon_args': None,
@@ -507,7 +509,7 @@ if __name__ == "__main__":
     'marathon_jmx': None,
     'marathon_jmx_host': '127.0.0.1',
     'marathon_repo': None,
-    'marathon_hacks': None,
+    'marathon_files': None,
 
     'zookeeper': '3.4',
     'zookeeper_nodes': '1',
