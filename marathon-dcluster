@@ -34,6 +34,7 @@ except ModuleNotFoundError:
     import urllib.request as urllib
 
 SPLIT_EQ = re.compile(r'\s*=\s*')
+VERSION_EXPR = re.compile(r'\/([0-9][0-9\.\-]+)\/')
 
 def mkdir_p(path):
   """
@@ -130,6 +131,28 @@ def waitForUrl(url, proc, timeout=30):
       return False
 
     time.sleep(1.0)
+
+def collectDCOSVersions(config):
+  """
+  Fetch DC/OS versions
+  """
+
+  # Get DC/OS target version
+  dcos_version = config['dcos']
+
+  # Collect marathon package info
+  marathon = json.loads(httpGet('https://raw.githubusercontent.com/dcos/dcos/%s/packages/marathon/buildinfo.json' % dcos_version))
+
+  # Extract a version-looking string from the
+  version = VERSION_EXPR.search(marathon['single_source']['url'])
+  if not version:
+    raise RuntimeError('Unable to detect marathon version for DC/OS {}'.format(dcos_version))
+  marathon_version = version.group(1)
+
+  # Collect mesos package info
+  mesos = json.loads(httpGet('https://raw.githubusercontent.com/dcos/dcos/%s/packages/mesos/buildinfo.json' % dcos_version))
+
+  return config
 
 
 def printBanner(configName, config):
