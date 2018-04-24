@@ -287,12 +287,21 @@ def createCompose(workdir, config):
           "    ports:",
           "      - '%i:2181'" % (int(config['zookeeper_port']) + i)
         ]
+      if config['share_folder']:
+        zk_lines += [
+          "    volumes:",
+          "      - %s:%s" % (config['share_folder'], config['share_folder_target']),
+        ]
       zk_lines += [ "" ]
 
     # Compose mesos volumes
     mesos_volumes = [
       "/var/run/docker.sock:/var/run/docker.sock"
     ]
+    if config['share_folder']:
+      mesos_volumes += [
+        "%s:%s" % (config['share_folder'], config['share_folder_target']),
+      ]
     if config['mesos_mount_log']:
       mesos_volumes += [ "%s/log/mesos-master:/var/log/mesos" % workdir ]
     if config['mesos_mount_workdir']:
@@ -458,12 +467,18 @@ def createCompose(workdir, config):
 
       # Mount hacked files
       marathon_volumes = []
+      if config['share_folder']:
+        marathon_volumes += [
+          "%s:%s" % (config['share_folder'], config['share_folder_target']),
+        ]
       if config['marathon_files']:
-        marathon_volumes = collectVolumeLinesForHacks(config['marathon_files'])
-        if len(marathon_volumes):
-          marathon_volumes = [
-            "    volumes:"
-          ] + marathon_volumes
+        file_volumes = collectVolumeLinesForHacks(config['marathon_files'])
+        if len(file_volumes):
+          marathon_volumes += file_volumes
+      if len(marathon_volumes):
+        marathon_volumes = [
+          "    volumes:",
+        ] + list(map(lambda x: "      - '%s'" % x, marathon_volumes))
 
       marathon_lines += [
         "    restart: on-failure",
@@ -592,7 +607,9 @@ if __name__ == "__main__":
     'mesos_resources_disk': None,
 
     'docker_network': None,
-    'custom_services': None
+    'custom_services': None,
+    'share_folder': None,
+    'share_folder_target': '/opt/shared'
   }
 
   # Parse arguments
