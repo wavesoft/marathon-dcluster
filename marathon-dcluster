@@ -491,6 +491,45 @@ def createCompose(workdir, config):
       '      name: %s' % config['docker_network'],
       ]
 
+    # Include custom services from file
+    custom_lines = []
+    if not config['custom_services'] is None:
+      indent_min = None
+      custom_lines += ['  ']
+      with open(config['custom_services'], 'r') as svc_f:
+        for line in svc_f:
+
+          # Make sure we indent with spaces
+          line = line.replace('\t', '  ').replace('\r', '').replace('\n', '')
+
+          # Count number of spaces before
+          indent = 0
+          for char in line:
+            if char == ' ':
+              indent += 1
+            else:
+              break
+
+          # Find the minimum indentation level
+          if (indent_min is None) or (indent < indent_min):
+            indent_min = indent
+
+          # Collect custom lines
+          custom_lines += [line]
+
+      # Adjust indentation on custom lines so it's exactly two characters
+      if indent_min < 2:
+        add_spaces = 2 - indent_min
+        space = ' ' * add_spaces
+        for i in range(0, len(custom_lines)):
+          custom_lines[i] = space + custom_lines[i]
+      elif indent_min > 2:
+        rm_spaces = indent_min - 2
+        for i in range(0, len(custom_lines)):
+          custom_lines[i] = custom_lines[i][rm_spaces:]
+
+      custom_lines += ['  ']
+
     # Compose lines
     lines = [
       "version: '3'",
@@ -500,7 +539,8 @@ def createCompose(workdir, config):
       + mesos_master_lines \
       + mesos_slave_lines \
       + marathon_lines \
-      + networks_lines
+      + networks_lines \
+      + custom_lines
 
     # Write down config
     f.write('\n'.join(lines))
@@ -551,7 +591,8 @@ if __name__ == "__main__":
     'mesos_resources_mem': None,
     'mesos_resources_disk': None,
 
-    'docker_network': None
+    'docker_network': None,
+    'custom_services': None
   }
 
   # Parse arguments
